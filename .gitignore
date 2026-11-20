@@ -1,0 +1,8 @@
+/.gradle/
+/build/
+/app/build/
+/.idea/
+*.iml
+/local.properties
+/esp32/.pio/
+/esp32/.vscode/
