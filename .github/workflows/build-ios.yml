@@ -1,0 +1,63 @@
+name: Build iOS BLE Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ios/**'
+      - '.github/workflows/build-ios.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+      - name: Show Xcode
+        run: xcodebuild -version
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate --spec project.yml
+      - name: Build iOS Simulator application (unsigned)
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild -project ParkingBLEProbe.xcodeproj -scheme ParkingBLEProbe -configuration Debug -sdk iphonesimulator -destination "generic/platform=iOS Simulator" -derivedDataPath "$PWD/DerivedData" CODE_SIGNING_ALLOWED=NO build 2>&1 | tee ios-build.log
+      - name: Package simulator app
+        if: success()
+        working-directory: ios
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent DerivedData/Build/Products/Debug-iphonesimulator/ParkingBLEProbe.app ParkingBLEProbe-iOS-Simulator.zip
+      - name: Package generated Xcode project
+        if: always()
+        working-directory: ios
+        run: |
+          zip -r ParkingBLEProbe-XcodeProject.zip ParkingBLEProbe.xcodeproj ParkingBLEProbe project.yml README.md
+      - name: Upload Xcode project for physical iPhone signing
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ParkingBLEProbe-iOS-Xcode-Project
+          path: ios/ParkingBLEProbe-XcodeProject.zip
+          if-no-files-found: warn
+      - name: Upload simulator app
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ParkingBLEProbe-iOS-Simulator
+          path: ios/ParkingBLEProbe-iOS-Simulator.zip
+          if-no-files-found: error
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ParkingBLEProbe-iOS-Build-Log
+          path: ios/ios-build.log
+          if-no-files-found: ignore
