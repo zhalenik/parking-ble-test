@@ -1,168 +1,412 @@
 import Foundation
+import Combine
 import CoreBluetooth
+import CoreLocation
 import SwiftUI
 import UIKit
 
-/// Тестовый BLE central. Для работы в фоне требуется UIBackgroundModes/bluetooth-central.
-/// iOS сама выбирает периоды сканирования: задержка обнаружения не гарантирована.
-final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate {
+/// Two independent iOS wake-up mechanisms:
+/// 1) iBeacon region via Core Location with Always permission
+/// 2) BLE GATT discovery + pending reconnect via Core Bluetooth restoration
+/// No Bluetooth pairing is requested; beacon identifiers are not secrets.
+final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate, CLLocationManagerDelegate {
     static let shared = BLEManager()
 
     static let serviceUUID = CBUUID(string: "c6ec1c8d-e23a-4751-93f8-31d4d4a17b10")
-    private static let restorationID = "parking-ble-probe-central-v1"
-    private static let enabledKey = "parking-ble-scan-enabled"
+    static let infoUUID = CBUUID(string: "c6ec1c8d-e23a-4751-93f8-31d4d4a17b11")
+    static let beaconUUID = UUID(uuidString: "F47D8F33-25FA-4DC8-92CB-8BE1199A6410")!
+    static let regionID = "parking-ibeacon-region-01"
+    static let ibeaconId = "ibeacon:F47D8F33-25FA-4DC8-92CB-8BE1199A6410:1:1"
+    private static let restoreID = "parking-ble-probe-central-v1"
 
-    @Published private(set) var bluetoothStatus = "Инициализация Bluetooth…"
-    @Published private(set) var scanEnabled = false
-    @Published private(set) var scanActive = false
+    private static let gattEnabledKey = "pilot-gatt-enabled"
+    private static let beaconEnabledKey = "pilot-ibeacon-enabled"
+    private static let peripheralKey = "pilot-last-gatt-peripheral-uuid"
+
+    @Published private(set) var bluetoothStatus = "Bluetooth: инициализация"
+    @Published private(set) var gattStatus = "GATT выключен"
+    @Published private(set) var beaconStatus = "iBeacon выключен"
+    @Published private(set) var gattEnabled: Bool
+    @Published private(set) var beaconEnabled: Bool
+    @Published private(set) var gattConnections = 0
+    @Published private(set) var beaconEntries = 0
     @Published private(set) var lastRSSI: Int?
-    @Published private(set) var discoveries = 0
-    @Published private(set) var lastDiscovery = "Пока нет"
     @Published private(set) var recentEvents: [String] = []
 
+    private let location = CLLocationManager()
     private var central: CBCentralManager!
-    private var knownIDs = Set<UUID>()
-    private var lastRSSILogged: [UUID: TimeInterval] = [:]
+    private var peripheral: CBPeripheral?
+    private var gattConnected = false
+    private var infoReadForConnection = false
+    private var knownGattId: String?
 
     private override init() {
-        scanEnabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
+        gattEnabled = UserDefaults.standard.bool(forKey: Self.gattEnabledKey)
+        beaconEnabled = UserDefaults.standard.bool(forKey: Self.beaconEnabledKey)
+        knownGattId = UserDefaults.standard.string(forKey: Self.peripheralKey)
         super.init()
         recentEvents = EventLog.shared.tail()
+        location.delegate = self
+        location.pausesLocationUpdatesAutomatically = true
+
         central = CBCentralManager(
             delegate: self,
             queue: .main,
             options: [
-                CBCentralManagerOptionRestoreIdentifierKey: Self.restorationID,
+                CBCentralManagerOptionRestoreIdentifierKey: Self.restoreID,
                 CBCentralManagerOptionShowPowerAlertKey: true
             ]
         )
-        note("APP_INIT", details: "saved_enabled=\(scanEnabled)")
+        log("PILOT_INIT", details: "gatt=\(gattEnabled) ibeacon=\(beaconEnabled)")
+        if beaconEnabled { configureBeaconMonitoring(prompt: false) }
     }
 
-    private func note(_ event: String, rssi: Int? = nil, id: UUID? = nil, details: String = "") {
-        let display = EventLog.shared.append(event: event, rssi: rssi, peripheral: id, details: details)
-        recentEvents.insert(display, at: 0)
-        if recentEvents.count > 35 {
-            recentEvents.removeLast(recentEvents.count - 35)
-        }
+    func logExternal(_ event: String, details: String = "") {
+        log(event, details: details)
     }
 
-    func start() {
-        scanEnabled = true
-        UserDefaults.standard.set(true, forKey: Self.enabledKey)
-        note("USER_START")
-        ensureScanning()
+    private func log(_ event: String,
+                     rssi: Int? = nil,
+                     id: UUID? = nil,
+                     details: String = "") {
+        let rendered = EventLog.shared.append(event: event, rssi: rssi, peripheral: id, details: details)
+        recentEvents.insert(rendered, at: 0)
+        if recentEvents.count > 50 { recentEvents.removeLast(recentEvents.count - 50) }
     }
 
-    func stop() {
-        scanEnabled = false
-        UserDefaults.standard.set(false, forKey: Self.enabledKey)
-        if central.isScanning {
-            central.stopScan()
-        }
-        scanActive = false
-        note("USER_STOP")
-    }
-
-    /// Создаёт временную отметку для ручного теста, например перед подходом к маяку.
-    func mark() {
-        note("MANUAL_MARK", details: "Отметка для сопоставления с наблюдением")
-    }
+    func mark() { log("MANUAL_MARK") }
 
     func resetLog() {
         EventLog.shared.reset()
         recentEvents = EventLog.shared.tail()
-        note("CSV_RESET")
+        log("CSV_RESET")
     }
 
     func recordScenePhase(_ phase: ScenePhase) {
         switch phase {
-        case .active: note("APP_ACTIVE")
-        case .inactive: note("APP_INACTIVE")
-        case .background: note("APP_BACKGROUND")
-        @unknown default: note("APP_UNKNOWN_PHASE")
+        case .active: log("APP_ACTIVE")
+        case .inactive: log("APP_INACTIVE")
+        case .background: log("APP_BACKGROUND")
+        @unknown default: log("APP_UNKNOWN_PHASE")
         }
-        if phase == .active && scanEnabled {
-            ensureScanning()
+        // Do not restart GATT discovery on every foreground transition.
+        // A pending CoreBluetooth connect is a persistent OS operation.
+        if phase == .active && beaconEnabled {
+            log("IBEACON_MONITOR_STATUS",
+                details: "authorized=\(location.authorizationStatus.rawValue) regions=\(location.monitoredRegions.count)")
         }
     }
 
-    private func ensureScanning() {
-        guard scanEnabled else { return }
+    // MARK: iBeacon (Core Location)
+
+    private func beaconRegion() -> CLBeaconRegion {
+        let region = CLBeaconRegion(uuid: Self.beaconUUID,
+                                    major: 1, minor: 1,
+                                    identifier: Self.regionID)
+        region.notifyOnEntry = true
+        region.notifyOnExit = true
+        return region
+    }
+
+    func startBeaconMonitoring() {
+        beaconEnabled = true
+        UserDefaults.standard.set(true, forKey: Self.beaconEnabledKey)
+        log("IBEACON_ENABLE")
+        configureBeaconMonitoring(prompt: true)
+    }
+
+    func stopBeaconMonitoring() {
+        beaconEnabled = false
+        UserDefaults.standard.set(false, forKey: Self.beaconEnabledKey)
+        for region in location.monitoredRegions where region.identifier == Self.regionID {
+            location.stopMonitoring(for: region)
+        }
+        beaconStatus = "iBeacon выключен"
+        log("IBEACON_STOP")
+    }
+
+    private func configureBeaconMonitoring(prompt: Bool) {
+        guard beaconEnabled else { return }
+        guard CLLocationManager.isMonitoringAvailable(for: CLBeaconRegion.self) else {
+            beaconStatus = "Мониторинг iBeacon недоступен"
+            log("IBEACON_UNAVAILABLE")
+            return
+        }
+        if location.authorizationStatus != .authorizedAlways {
+            beaconStatus = "Нужно разрешение геолокации «Всегда»"
+            log("IBEACON_NEEDS_ALWAYS", details: "auth=\(location.authorizationStatus.rawValue)")
+            if prompt { location.requestAlwaysAuthorization() }
+            return
+        }
+        guard !location.monitoredRegions.contains(where: {$0.identifier == Self.regionID}) else {
+            beaconStatus = "iBeacon мониторинг зарегистрирован"
+            return
+        }
+        location.startMonitoring(for: beaconRegion())
+        beaconStatus = "Регистрация iBeacon мониторинга…"
+        log("IBEACON_MONITOR_START", details: Self.ibeaconId)
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        log("LOCATION_AUTH", details: "status=\(manager.authorizationStatus.rawValue)")
+        if beaconEnabled { configureBeaconMonitoring(prompt: false) }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didStartMonitoringFor region: CLRegion) {
+        guard region.identifier == Self.regionID else { return }
+        beaconStatus = "iBeacon мониторинг активен"
+        log("IBEACON_MONITOR_READY")
+        // State checks are informational only. They do NOT trigger automatic POST,
+        // avoiding an opening solely because the app was just started at the gate.
+        manager.requestState(for: region)
+    }
+
+    func locationManager(_ manager: CLLocationManager,
+                         didDetermineState state: CLRegionState,
+                         for region: CLRegion) {
+        guard region.identifier == Self.regionID else { return }
+        let value: String
+        switch state {
+        case .inside: value = "INSIDE"
+        case .outside: value = "OUTSIDE"
+        case .unknown: value = "UNKNOWN"
+        @unknown default: value = "UNKNOWN"
+        }
+        log("IBEACON_STATE", details: value)
+    }
+
+    func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+        guard beaconEnabled && region.identifier == Self.regionID else { return }
+        beaconEntries += 1
+        log("IBEACON_ENTER", details: Self.ibeaconId)
+        APIClient.shared.submit(source: "ibeacon", beaconId: Self.ibeaconId, event: "enter")
+    }
+
+    func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+        guard beaconEnabled && region.identifier == Self.regionID else { return }
+        log("IBEACON_EXIT", details: Self.ibeaconId)
+    }
+
+    func locationManager(_ manager: CLLocationManager,
+                         monitoringDidFailFor region: CLRegion?,
+                         withError error: Error) {
+        beaconStatus = "Ошибка мониторинга iBeacon"
+        log("IBEACON_MONITOR_ERROR", details: "code=\((error as NSError).code)")
+    }
+
+    // MARK: Core Bluetooth GATT + pending reconnect
+
+    func startGatt() {
+        gattEnabled = true
+        UserDefaults.standard.set(true, forKey: Self.gattEnabledKey)
+        log("GATT_ENABLE")
+        ensureGatt()
+    }
+
+    func stopGatt() {
+        gattEnabled = false
+        UserDefaults.standard.set(false, forKey: Self.gattEnabledKey)
+        central.stopScan()
+        if let p = peripheral {
+            central.cancelPeripheralConnection(p)
+        }
+        peripheral = nil
+        gattConnected = false
+        infoReadForConnection = false
+        gattStatus = "GATT выключен"
+        log("GATT_STOP")
+    }
+
+    func forgetGattAndRescan() {
+        if let p = peripheral { central.cancelPeripheralConnection(p) }
+        central.stopScan()
+        peripheral = nil
+        gattConnected = false
+        infoReadForConnection = false
+        knownGattId = nil
+        UserDefaults.standard.removeObject(forKey: Self.peripheralKey)
+        log("GATT_FORGET_DEVICE")
+        if gattEnabled { ensureGatt() }
+    }
+
+    private func ensureGatt() {
+        guard gattEnabled else { return }
         guard central.state == .poweredOn else {
-            note("SCAN_WAIT_BLUETOOTH", details: bluetoothStatus)
+            gattStatus = "GATT ожидает включения Bluetooth"
             return
         }
-        guard !central.isScanning else {
-            scanActive = true
+        if let p = peripheral {
+            if p.state == .disconnected {
+                log("GATT_PENDING_CONNECT", id: p.identifier)
+                central.connect(p, options: nil)
+                gattStatus = "Ожидает BLE-подключения (iOS)"
+            } else if p.state == .connected {
+                gattStatus = "GATT подключён"
+            } else {
+                gattStatus = "Ожидает BLE-подключения (iOS)"
+            }
             return
         }
-        knownIDs.removeAll()
-        lastRSSILogged.removeAll()
-        // CoreBluetooth требует service UUID для фонового сканирования.
-        // В фоне iOS игнорирует allowDuplicates и может доставлять события с задержкой.
-        central.scanForPeripherals(
-            withServices: [Self.serviceUUID],
-            options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
-        )
-        scanActive = central.isScanning
-        note("SCAN_START", details: "UUID=\(Self.serviceUUID.uuidString)")
+        if let saved = knownGattId,
+           let identifier = UUID(uuidString: saved) {
+            let recovered = central.retrievePeripherals(withIdentifiers: [identifier])
+            if let p = recovered.first {
+                peripheral = p
+                p.delegate = self
+                log("GATT_RETRIEVE_SAVED", id: p.identifier)
+                ensureGatt()
+                return
+            }
+        }
+        if !central.isScanning {
+            central.scanForPeripherals(withServices: [Self.serviceUUID], options: nil)
+            log("GATT_SCAN_START", details: Self.serviceUUID.uuidString)
+        }
+        gattStatus = "Поиск маяка GATT"
     }
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
         case .poweredOn: bluetoothStatus = "Bluetooth включён"
         case .poweredOff: bluetoothStatus = "Bluetooth выключен"
-        case .unauthorized: bluetoothStatus = "Нет разрешения Bluetooth"
+        case .unauthorized: bluetoothStatus = "Bluetooth не разрешён"
         case .unsupported: bluetoothStatus = "BLE не поддерживается"
         case .resetting: bluetoothStatus = "Bluetooth перезапускается"
-        case .unknown: bluetoothStatus = "Состояние Bluetooth неизвестно"
-        @unknown default: bluetoothStatus = "Неизвестное состояние"
+        case .unknown: bluetoothStatus = "Bluetooth неизвестен"
+        @unknown default: bluetoothStatus = "Bluetooth неизвестен"
         }
-        scanActive = central.isScanning
-        note("BLE_STATE", details: bluetoothStatus)
-        if central.state == .poweredOn {
-            ensureScanning()
-        }
+        log("BLE_STATE", details: bluetoothStatus)
+        if central.state == .poweredOn { ensureGatt() }
     }
 
-    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
-        let restored = (dict[CBCentralManagerRestoredStateScanServicesKey] as? [CBUUID]) ?? []
-        note("IOS_STATE_RESTORED", details: "services=\(restored.map(\.uuidString).joined(separator: ";"))")
-        if !scanEnabled && central.isScanning {
+    func centralManager(_ central: CBCentralManager, willRestoreState state: [String: Any]) {
+        let restored = state[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
+        log("GATT_STATE_RESTORED",
+            details: "peripherals=\(restored.count)")
+        if !gattEnabled {
+            for p in restored { central.cancelPeripheralConnection(p) }
             central.stopScan()
+            return
         }
-        scanActive = central.isScanning
+        if let p = restored.first {
+            peripheral = p
+            p.delegate = self
+            knownGattId = p.identifier.uuidString
+            UserDefaults.standard.set(knownGattId, forKey: Self.peripheralKey)
+            if p.state == .connected {
+                gattConnected = true
+                p.discoverServices([Self.serviceUUID])
+            } else if p.state == .disconnected {
+                ensureGatt()
+            }
+            gattStatus = "GATT восстановлен из iOS"
+        } else {
+            ensureGatt()
+        }
     }
 
     func centralManager(_ central: CBCentralManager,
-                        didDiscover peripheral: CBPeripheral,
+                        didDiscover found: CBPeripheral,
                         advertisementData: [String: Any],
                         rssi RSSI: NSNumber) {
-        guard scanEnabled else { return }
-        let uuid = peripheral.identifier
-        let value = RSSI.intValue
-        let now = ProcessInfo.processInfo.systemUptime
-        lastRSSI = value
-        lastDiscovery = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        discoveries += 1
-
-        if knownIDs.insert(uuid).inserted {
-            note("DISCOVER_FIRST", rssi: value, id: uuid)
-        } else {
-            let previous = lastRSSILogged[uuid] ?? 0
-            // В активном окне не записываем каждый рекламный пакет:
-            // один RSSI SAMPLE в секунду. В фоне сохраняем все доставленные колбэки.
-            if UIApplication.shared.applicationState != .active || now - previous >= 1.0 {
-                note("DISCOVER_REPEAT", rssi: value, id: uuid)
-            }
-        }
-        lastRSSILogged[uuid] = now
+        guard gattEnabled && peripheral == nil else { return }
+        peripheral = found
+        found.delegate = self
+        knownGattId = found.identifier.uuidString
+        UserDefaults.standard.set(knownGattId, forKey: Self.peripheralKey)
+        lastRSSI = RSSI.intValue
+        central.stopScan()
+        gattStatus = "Подключение к GATT…"
+        log("GATT_DISCOVERED", rssi: RSSI.intValue, id: found.identifier)
+        central.connect(found, options: nil)
     }
 
-    func centralManager(_ central: CBCentralManager,
-                        didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        note("BLE_CONNECT_FAIL", id: peripheral.identifier,
-             details: error.map(String.init(describing:)) ?? "")
+    func centralManager(_ central: CBCentralManager, didConnect p: CBPeripheral) {
+        guard gattEnabled else {
+            central.cancelPeripheralConnection(p)
+            return
+        }
+        peripheral = p
+        p.delegate = self
+        gattConnected = true
+        infoReadForConnection = false
+        gattConnections += 1
+        gattStatus = "GATT подключён, читаем ID"
+        log("GATT_CONNECTED", id: p.identifier)
+        p.discoverServices([Self.serviceUUID])
+        p.readRSSI()
+    }
+
+    func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {
+        if let error = error {
+            log("GATT_SERVICES_ERROR", details: "\(error.localizedDescription)")
+            return
+        }
+        guard let service = p.services?.first(where: {$0.uuid == Self.serviceUUID}) else {
+            log("GATT_SERVICE_MISSING", id: p.identifier)
+            return
+        }
+        p.discoverCharacteristics([Self.infoUUID], for: service)
+    }
+
+    func peripheral(_ p: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        if let error = error {
+            log("GATT_CHAR_ERROR", details: "\(error.localizedDescription)")
+            return
+        }
+        guard let char = service.characteristics?.first(where: {$0.uuid == Self.infoUUID}) else {
+            log("GATT_CHAR_MISSING")
+            return
+        }
+        p.readValue(for: char)
+    }
+
+    func peripheral(_ p: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard gattEnabled && characteristic.uuid == Self.infoUUID && !infoReadForConnection else { return }
+        if let error = error {
+            log("GATT_READ_ERROR", details: "\(error.localizedDescription)")
+            return
+        }
+        guard let bytes = characteristic.value,
+              let beaconId = String(data: bytes, encoding: .utf8),
+              beaconId.hasPrefix("gatt:"),
+              beaconId.count <= 80 else {
+            log("GATT_BAD_BEACON_ID", id: p.identifier)
+            return
+        }
+        infoReadForConnection = true
+        gattStatus = "GATT подключён: \(beaconId)"
+        log("GATT_ID_READ", id: p.identifier, details: beaconId)
+        // One POST attempt per new GATT connection (subject to shared 60s cooldown).
+        APIClient.shared.submit(source: "gatt", beaconId: beaconId, event: "connected")
+    }
+
+    func peripheral(_ p: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
+        if error == nil {
+            lastRSSI = RSSI.intValue
+            log("GATT_RSSI", rssi: RSSI.intValue, id: p.identifier)
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
+        gattConnected = false
+        infoReadForConnection = false
+        gattStatus = "GATT отключён"
+        log("GATT_DISCONNECTED", id: p.identifier,
+            details: error.map { "code=\(($0 as NSError).code)" } ?? "normal")
+        // This call can remain pending while the client is away.
+        if gattEnabled {
+            central.connect(p, options: nil)
+            gattStatus = "Ожидает переподключения (iOS)"
+            log("GATT_PENDING_RECONNECT", id: p.identifier)
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
+        gattConnected = false
+        gattStatus = "GATT: ошибка подключения"
+        log("GATT_CONNECT_FAILED", id: p.identifier,
+            details: error.map { "code=\(($0 as NSError).code)" } ?? "")
+        // No continuous retry timer. User can explicitly forget/re-scan if needed.
     }
 }
