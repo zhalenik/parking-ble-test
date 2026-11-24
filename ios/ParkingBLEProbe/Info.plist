@@ -2,31 +2,26 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleIdentifier</key>
-  <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-  <key>CFBundleExecutable</key>
-  <string>$(EXECUTABLE_NAME)</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleInfoDictionaryVersion</key>
-  <string>6.0</string>
-  <key>CFBundleDevelopmentRegion</key>
-  <string>ru</string>
-  <key>CFBundleDisplayName</key>
-  <string>Parking BLE Probe</string>
-  <key>CFBundleName</key>
-  <string>ParkingBLEProbe</string>
-  <key>CFBundleShortVersionString</key>
-  <string>1.0.0</string>
-  <key>CFBundleVersion</key>
-  <string>1</string>
-  <key>LSRequiresIPhoneOS</key>
-  <true/>
+  <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleDevelopmentRegion</key><string>ru</string>
+  <key>CFBundleDisplayName</key><string>Parking BLE Probe 2</string>
+  <key>CFBundleName</key><string>ParkingBLEProbe</string>
+  <key>CFBundleShortVersionString</key><string>2.0.0</string>
+  <key>CFBundleVersion</key><string>2</string>
+  <key>LSRequiresIPhoneOS</key><true/>
   <key>NSBluetoothAlwaysUsageDescription</key>
-  <string>Bluetooth необходим для обнаружения тестового BLE-маяка парковки и измерения времени обнаружения.</string>
+  <string>Для автоматического обнаружения парковочного BLE-маяка и подключения без сопряжения.</string>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>Для обнаружения iBeacon возле парковки, даже если приложение закрыто.</string>
+  <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+  <string>Разрешение «Всегда» требуется, чтобы iPhone мог отслеживать iBeacon между визитами и разбудить приложение при подъезде к воротам.</string>
   <key>UIBackgroundModes</key>
   <array>
     <string>bluetooth-central</string>
+    <string>location</string>
   </array>
   <key>UISupportedInterfaceOrientations</key>
   <array>
@@ -34,9 +29,6 @@
     <string>UIInterfaceOrientationPortraitUpsideDown</string>
   </array>
   <key>UIApplicationSceneManifest</key>
-  <dict>
-    <key>UIApplicationSupportsMultipleScenes</key>
-    <false/>
-  </dict>
+  <dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
 </dict>
 </plist>
