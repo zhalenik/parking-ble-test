@@ -16,7 +16,6 @@ static const int8_t CALIBRATED_RSSI_AT_1M = -59;  // nominal, measure before dep
 static const uint16_t ADV_INTERVAL = 256;       // 256 * 0.625 ms = 160 ms
 
 void setup() {
-  Serial.begin(115200);
   delay(400);
   BLEDevice::init(DEVICE_NAME);
 
@@ -45,9 +44,8 @@ void setup() {
   adv->setMaxInterval(ADV_INTERVAL);
   adv->start();
 
-  Serial.println("iBeacon started.");
-  Serial.println("UUID F47D8F33-25FA-4DC8-92CB-8BE1199A6410 major=1 minor=1");
-  Serial.println("beacon_id=ibeacon:F47D8F33-25FA-4DC8-92CB-8BE1199A6410:1:1");
+
+
 }
 
 void loop() { delay(5000); }
