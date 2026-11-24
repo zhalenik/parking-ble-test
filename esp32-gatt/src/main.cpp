@@ -13,7 +13,7 @@ static const uint16_t ADV_INTERVAL = 256; // 160 ms
 
 class Callbacks : public BLEServerCallbacks {
   void onConnect(BLEServer*) override {
-    Serial.println("GATT connected");
+
   }
   void onDisconnect(BLEServer*) override {
     Serial.println("GATT disconnected; restarting advertising");
@@ -22,7 +22,6 @@ class Callbacks : public BLEServerCallbacks {
 };
 
 void setup() {
-  Serial.begin(115200);
   delay(500);
   BLEDevice::init(DEVICE_NAME);
   BLEServer *server = BLEDevice::createServer();
@@ -41,7 +40,6 @@ void setup() {
   adv->setMaxInterval(ADV_INTERVAL);
   adv->start();
 
-  Serial.println("GATT test device ready");
-  Serial.println(BEACON_ID);
+
 }
 void loop() { delay(3000); }
