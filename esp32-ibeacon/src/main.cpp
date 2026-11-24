@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <string>
 #include <BLEDevice.h>
 #include <BLEAdvertising.h>
 #include <BLEUtils.h>
@@ -35,7 +36,7 @@ void setup() {
   BLEAdvertisementData advData;
   advData.setFlags(0x06); // BR/EDR not supported + general discoverable
   // 3 bytes Flags + 2 bytes AD header + 25 bytes payload = 30 bytes, fits 31.
-  advData.setManufacturerData(String((const char*)manufacturer, sizeof(manufacturer)));
+  advData.setManufacturerData(std::string((const char*)manufacturer, sizeof(manufacturer)));
 
   BLEAdvertising *adv = BLEDevice::getAdvertising();
   adv->setAdvertisementData(advData);
