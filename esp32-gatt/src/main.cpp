@@ -16,7 +16,6 @@ class Callbacks : public BLEServerCallbacks {
 
   }
   void onDisconnect(BLEServer*) override {
-    Serial.println("GATT disconnected; restarting advertising");
     BLEDevice::startAdvertising();
   }
 };
