@@ -1,86 +1,135 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @EnvironmentObject private var ble: BLEManager
+    @EnvironmentObject private var api: APIClient
+    @State private var endpointInput = ""
+    @State private var tokenInput = ""
     @State private var showResetConfirmation = false
-
-    private var isReady: Bool {
-        ble.bluetoothStatus == "Bluetooth включён"
-    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    statusCard
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Два независимых способа пробуждения iPhone. Никакого Bluetooth-сопряжения пользователю не требуется.")
+                        .font(.subheadline).foregroundStyle(.secondary)
 
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("Измерение сигнала")
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("1. iBeacon · Core Location")
                             .font(.headline)
-                        HStack(alignment: .firstTextBaseline) {
-                            Text(ble.lastRSSI.map { "\($0) dBm" } ?? "— dBm")
-                                .font(.system(size: 34, weight: .semibold, design: .rounded))
-                                .monospacedDigit()
-                            Spacer()
-                            Text("Обнаружений: \(ble.discoveries)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        Text(ble.beaconStatus).font(.subheadline)
+                        Text("Входов в регион: \(ble.beaconEntries)")
+                            .font(.caption).monospacedDigit()
+                        Button {
+                            ble.beaconEnabled ? ble.stopBeaconMonitoring() : ble.startBeaconMonitoring()
+                        } label: {
+                            Label(ble.beaconEnabled ? "Остановить iBeacon" : "Включить мониторинг iBeacon",
+                                  systemImage: ble.beaconEnabled ? "stop.circle" : "location.circle")
+                                .frame(maxWidth: .infinity)
                         }
-                        Text("Последнее событие: \(ble.lastDiscovery)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text("Сигнал можно сравнивать между подходами, но RSSI не является точным расстоянием.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        .buttonStyle(.borderedProminent)
+                        Text("Для пробуждения через Core Location после долгого ожидания требуется разрешение геолокации «Всегда».")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     .cardStyle()
 
-                    VStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("2. GATT · Core Bluetooth")
+                            .font(.headline)
+                        Text(ble.bluetoothStatus).font(.subheadline)
+                        Text(ble.gattStatus).font(.subheadline).foregroundStyle(.secondary)
+                        Text("Подключений: \(ble.gattConnections)")
+                            .font(.caption).monospacedDigit()
+                        if let rssi = ble.lastRSSI {
+                            Text("RSSI: \(rssi) dBm").font(.caption).monospacedDigit()
+                        }
                         Button {
-                            ble.scanEnabled ? ble.stop() : ble.start()
+                            ble.gattEnabled ? ble.stopGatt() : ble.startGatt()
                         } label: {
-                            Label(ble.scanEnabled ? "Остановить BLE-сканирование" : "Запустить BLE-сканирование",
-                                  systemImage: ble.scanEnabled ? "stop.circle.fill" : "dot.radiowaves.left.and.right")
+                            Label(ble.gattEnabled ? "Остановить GATT" : "Включить GATT reconnect",
+                                  systemImage: ble.gattEnabled ? "stop.circle" : "antenna.radiowaves.left.and.right")
                                 .frame(maxWidth: .infinity)
-                                .padding(6)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!isReady && !ble.scanEnabled)
-
-                        HStack {
-                            Button {
-                                ble.mark()
-                            } label: {
-                                Label("Поставить метку", systemImage: "mappin.and.ellipse")
-                            }
-                            .buttonStyle(.bordered)
-
-                            Spacer()
-
-                            ShareLink(item: EventLog.shared.fileURL) {
-                                Label("Экспорт CSV", systemImage: "square.and.arrow.up")
-                            }
-                            .buttonStyle(.bordered)
+                        Button("Забыть сохранённый GATT и искать заново") {
+                            ble.forgetGattAndRescan()
                         }
-
-                        Button(role: .destructive) {
-                            showResetConfirmation = true
-                        } label: {
-                            Text("Очистить журнал")
-                                .font(.caption)
-                        }
-                        .padding(.top, 2)
+                        .font(.caption)
+                        Text("iOS сохраняет запрос подключения. Вдали от маяка ожидаем reconnect без таймеров и постоянной работы приложения.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
+                    .cardStyle()
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Журнал BLE")
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("3. Тестовый HTTPS API")
                             .font(.headline)
-                        Text("Новые события сверху. Журнал сохраняется при выключении экрана.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        TextField("https://example.ru/api/mobile/beacon-event", text: $endpointInput)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                            .textFieldStyle(.roundedBorder)
+                        SecureField("Персональный токен (пусто = не менять)", text: $tokenInput)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .textFieldStyle(.roundedBorder)
+                        HStack {
+                            Button("Сохранить адрес и токен") {
+                                api.save(endpoint: endpointInput, token: tokenInput)
+                                tokenInput = ""
+                            }
+                            .buttonStyle(.bordered)
+                            Spacer()
+                            Text(api.hasToken ? "Токен в Keychain" : "Нет токена")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Toggle("Автоматически отправлять POST", isOn: Binding(
+                            get: { api.autoPost },
+                            set: { api.setAutoPost($0) }
+                        ))
+                        Text("Изначально выключено. Одна отправка при входе в iBeacon-регион или новом GATT-подключении. Общий cooldown 60 с, без автоматических повторов.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("Отправить ручной TEST POST") {
+                            api.submit(source: "manual", beaconId: "test:manual",
+                                       event: "test", manual: true)
+                        }
+                        .buttonStyle(.bordered)
+                        Text(api.networkStatus)
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button(role: .destructive) {
+                            api.removeToken()
+                        } label: { Text("Удалить сохранённый токен").font(.caption) }
+                    }
+                    .cardStyle()
+
+                    HStack {
+                        Button {
+                            ble.mark()
+                        } label: {
+                            Label("Отметка", systemImage: "mappin.and.ellipse")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Spacer()
+
+                        ShareLink(item: EventLog.shared.fileURL) {
+                            Label("Экспорт CSV", systemImage: "square.and.arrow.up")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    Button("Открыть настройки разрешений iOS") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    }
+                    .font(.caption)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Журнал").font(.headline)
                         ForEach(Array(ble.recentEvents.enumerated()), id: \.offset) { _, line in
                             Text(line)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(size: 10, design: .monospaced))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .textSelection(.enabled)
                             Divider()
@@ -88,68 +137,30 @@ struct ContentView: View {
                     }
                     .cardStyle()
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Как проверить")
-                            .font(.headline)
-                        Text("1. Включите сканирование и подтвердите разрешение Bluetooth.")
-                        Text("2. Дождитесь DISCOVER_FIRST рядом с ESP32-C3.")
-                        Text("3. Удалитесь от маяка, подождите, заблокируйте iPhone и снова приблизьтесь.")
-                        Text("4. Разблокируйте iPhone и экспортируйте CSV.")
-                        Text("Сканирование в фоне ограничено iOS. Повторное событие при новом подходе не гарантируется: iOS может объединять BLE-пакеты.")
-                        Text("Принудительно закрытое свайпом приложение может не пробуждаться. Отдельную функцию открытия шлагбаума этот прототип не содержит.")
-                            .foregroundStyle(.secondary)
-                    }
-                    .font(.footnote)
-                    .cardStyle()
+                    Text("Это диагностическая версия. Не подключайте POST к действующей команде ворот до проверки сервера в режиме без физических действий. iOS не гарантирует задержки пробуждения.")
+                        .font(.footnote).foregroundStyle(.secondary)
 
-                    Text("BLE Service UUID: \(BLEManager.serviceUUID.uuidString)")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
+                    Button(role: .destructive) { showResetConfirmation = true } label: {
+                        Text("Очистить журнал").font(.caption)
+                    }
                 }
                 .padding()
             }
             .background(Color(uiColor: .systemGroupedBackground))
-            .navigationTitle("Parking BLE Probe")
+            .navigationTitle("Parking BLE Probe 2")
             .navigationBarTitleDisplayMode(.inline)
-            .confirmationDialog("Удалить все записи BLE?", isPresented: $showResetConfirmation,
-                                titleVisibility: .visible) {
-                Button("Очистить журнал", role: .destructive) { ble.resetLog() }
+            .confirmationDialog("Удалить записи журнала?", isPresented: $showResetConfirmation) {
+                Button("Очистить", role: .destructive) { ble.resetLog() }
             }
+            .onAppear { endpointInput = api.endpoint }
         }
-    }
-
-    private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "antenna.radiowaves.left.and.right")
-                    .font(.title2)
-                    .foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(ble.bluetoothStatus)
-                        .font(.headline)
-                    Text(ble.scanEnabled
-                         ? (ble.scanActive ? "Сканирование зарегистрировано" : "Ожидаем Bluetooth")
-                         : "BLE-сканирование остановлено")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            if ble.scanEnabled {
-                Text("После блокировки экрана система может уменьшить частоту поиска маяков.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .cardStyle()
     }
 }
 
 private struct CardStyle: ViewModifier {
     func body(content: Content) -> some View {
-        content
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(15)
+        content.frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 15))
     }
 }
