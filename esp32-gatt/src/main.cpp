@@ -28,7 +28,7 @@ class Callbacks : public BLEServerCallbacks {
 void setup() {
   WiFi.mode(WIFI_OFF);
   BLEDevice::init(DEVICE_NAME);
-  BLEDevice::setPower(ESP_PWR_LVL_P0); // approx. 0 dBm, not maximum
+  BLEDevice::setPower(ESP_PWR_LVL_N0); // approx. 0 dBm, not maximum
 
   BLEServer *server = BLEDevice::createServer();
   server->setCallbacks(new Callbacks());
