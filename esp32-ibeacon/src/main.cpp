@@ -21,7 +21,7 @@ static const uint16_t ADV_INTERVAL = 256; // 160 ms
 void setup() {
   WiFi.mode(WIFI_OFF);
   BLEDevice::init(DEVICE_NAME);
-  BLEDevice::setPower(ESP_PWR_LVL_P0); // approx. 0 dBm, not maximum
+  BLEDevice::setPower(ESP_PWR_LVL_N0); // approx. 0 dBm, not maximum
 
   // 25-byte manufacturer data:
   // Apple company ID (4C 00), iBeacon marker (02 15), 16-byte UUID,
