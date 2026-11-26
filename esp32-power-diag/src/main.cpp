@@ -100,7 +100,7 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   WiFi.mode(WIFI_OFF);
-  Serial.printf("Arduino=%s IDF=%s\n", ESP_ARDUINO_VERSION_STR, esp_get_idf_version());
+  Serial.printf("Arduino=%d.%d.%d IDF=%s\n", ESP_ARDUINO_VERSION_MAJOR, ESP_ARDUINO_VERSION_MINOR, ESP_ARDUINO_VERSION_PATCH, esp_get_idf_version());
 #if defined(CONFIG_BT_CTRL_MODEM_SLEEP) && CONFIG_BT_CTRL_MODEM_SLEEP
   Serial.println("CONFIG_BT_CTRL_MODEM_SLEEP=1");
 #else
