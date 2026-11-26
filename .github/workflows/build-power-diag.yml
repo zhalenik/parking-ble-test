@@ -1,0 +1,25 @@
+name: Build ESP32 power diagnostic
+on:
+  push:
+    branches: [diagnostics/esp32-power-45s]
+    paths:
+      - 'esp32-power-diag/**'
+      - '.github/workflows/build-power-diag.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install platformio
+      - run: pio run -d esp32-power-diag
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32-power-diag
+          path: esp32-power-diag/.pio/build/*/*.bin
+          if-no-files-found: error
